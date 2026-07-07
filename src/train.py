@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--no_save_checkpoint", action="store_true")
     parser.add_argument("--vision_layers_unfrozen", type=int, default=1)
     parser.add_argument("--text_layers_unfrozen", type=int, default=2)
 
@@ -53,18 +54,23 @@ def train_one_epoch(
 ) -> float:
     model.train()
     total_loss = 0.0
+
+    grad_accum_steps = max(1, grad_accum_steps)
     optimizer.zero_grad(set_to_none=True)
 
+    use_cuda = device.type == "cuda"
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    scaler_enabled = device.type == "cuda" and not use_bf16
-    scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
+    scaler_enabled = use_cuda and not use_bf16
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
-    for step, batch in enumerate(tqdm(dataloader, desc="Training")):
-        images = batch["images"].to(device)
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
+    progress_bar = tqdm(dataloader, desc="Training")
 
-        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=device.type == "cuda"):
+    for step, batch in enumerate(progress_bar):
+        images = batch["images"].to(device, non_blocking=True)
+        input_ids = batch["input_ids"].to(device, non_blocking=True)
+        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_cuda):
             outputs = model(images, input_ids, attention_mask)
             loss = loss_fn(
                 outputs["image_embeds"],
@@ -78,7 +84,10 @@ def train_one_epoch(
         else:
             loss.backward()
 
-        if (step + 1) % grad_accum_steps == 0:
+        is_accumulation_step = (step + 1) % grad_accum_steps == 0
+        is_last_step = (step + 1) == len(dataloader)
+
+        if is_accumulation_step or is_last_step:
             if scaler_enabled:
                 scaler.step(optimizer)
                 scaler.update()
@@ -88,7 +97,9 @@ def train_one_epoch(
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
-        total_loss += loss.item() * grad_accum_steps
+        current_loss = loss.item() * grad_accum_steps
+        total_loss += current_loss
+        progress_bar.set_postfix({"loss": f"{current_loss:.4f}"})
 
     return total_loss / max(len(dataloader), 1)
 
@@ -101,21 +112,45 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    print("=" * 80, flush=True)
+    print("[INFO] Starting Medical GRAM-CLIP training", flush=True)
+    print(f"[INFO] Loss type: {args.loss_type}", flush=True)
+    print(f"[INFO] Device: {device}", flush=True)
+    print(f"[INFO] CSV path: {args.csv_path}", flush=True)
+    print(f"[INFO] Image root: {args.image_root}", flush=True)
+    print(f"[INFO] Output dir: {args.output_dir}", flush=True)
+    print("=" * 80, flush=True)
+
+    print("[INFO] Loading dataset...", flush=True)
     dataset = MimicCXRDataset(
         csv_path=args.csv_path,
         image_root=args.image_root,
         max_samples=args.max_samples,
     )
 
-    val_size = int(len(dataset) * args.val_ratio)
+    if len(dataset) < 2:
+        raise ValueError("Dataset must contain at least 2 samples.")
+
+    val_size = max(1, int(len(dataset) * args.val_ratio))
     train_size = len(dataset) - val_size
+
+    if train_size < 1:
+        raise ValueError("Training split is empty. Increase dataset size or reduce val_ratio.")
+
+    print(f"[INFO] Dataset loaded: {len(dataset)} samples", flush=True)
+    print(f"[INFO] Train samples: {train_size}", flush=True)
+    print(f"[INFO] Validation samples: {val_size}", flush=True)
+
     train_dataset, val_dataset = random_split(
         dataset,
         [train_size, val_size],
         generator=torch.Generator().manual_seed(42),
     )
 
+    print("[INFO] Loading BioClinicalBERT tokenizer...", flush=True)
     collator = MedicalCollator()
+
+    pin_memory = device.type == "cuda"
 
     train_loader = DataLoader(
         train_dataset,
@@ -123,7 +158,7 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         collate_fn=collator,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
 
     val_loader = DataLoader(
@@ -132,16 +167,22 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collator,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
 
+    print("[INFO] Loading ViT + BioClinicalBERT model...", flush=True)
     model = MedicalMultimodal(projection_dim=args.projection_dim)
+
+    print("[INFO] Freezing encoders...", flush=True)
     model.freeze_encoders(
         vision_layers_unfrozen=args.vision_layers_unfrozen,
         text_layers_unfrozen=args.text_layers_unfrozen,
     )
-    model.to(device)
 
+    model.to(device)
+    print("[INFO] Model ready", flush=True)
+
+    print(f"[INFO] Initializing loss: {args.loss_type}", flush=True)
     loss_fn = LossRouter(args.loss_type, gram_repo_path=args.gram_repo_path)
 
     optimizer = AdamW(
@@ -150,12 +191,21 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
 
-    total_steps = max(len(train_loader) * args.epochs // args.grad_accum_steps, 1)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    steps_per_epoch = max(1, (len(train_loader) + args.grad_accum_steps - 1) // args.grad_accum_steps)
+    total_steps = max(1, steps_per_epoch * args.epochs)
+
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_steps,
+    )
 
     history: List[Dict[str, float]] = []
 
+    print("[INFO] Starting training loop...", flush=True)
+
     for epoch in range(args.epochs):
+        print(f"\n[INFO] Epoch {epoch + 1}/{args.epochs}", flush=True)
+
         train_loss = train_one_epoch(
             model=model,
             loss_fn=loss_fn,
@@ -167,14 +217,23 @@ def main() -> None:
             use_bf16=args.bf16,
         )
 
+        print("[INFO] Running retrieval evaluation...", flush=True)
         metrics = retrieval_metrics(model, val_loader, device)
-        row: Dict[str, float] = {"epoch": float(epoch + 1), "train_loss": train_loss}
+
+        row: Dict[str, float] = {
+            "epoch": float(epoch + 1),
+            "train_loss": train_loss,
+        }
         row.update(metrics)
         history.append(row)
 
-        print(json.dumps(row, indent=2))
+        print("[INFO] Epoch metrics:", flush=True)
+        print(json.dumps(row, indent=2), flush=True)
 
-        with open(output_dir / "metrics.json", "w") as f:
+        metrics_path = output_dir / "metrics.json"
+        print(f"[INFO] Saving metrics to {metrics_path}", flush=True)
+
+        with open(metrics_path, "w") as f:
             json.dump(
                 {
                     "loss_type": args.loss_type,
@@ -185,7 +244,15 @@ def main() -> None:
                 indent=2,
             )
 
-        torch.save(model.state_dict(), output_dir / f"model_epoch_{epoch + 1}.pt")
+        if not args.no_save_checkpoint:
+            checkpoint_path = output_dir / f"model_epoch_{epoch + 1}.pt"
+            print(f"[INFO] Saving checkpoint to {checkpoint_path}", flush=True)
+            torch.save(model.state_dict(), checkpoint_path)
+            print("[INFO] Checkpoint saved", flush=True)
+        else:
+            print("[INFO] Skipping checkpoint save", flush=True)
+
+    print("\n[INFO] Training completed successfully.", flush=True)
 
 
 if __name__ == "__main__":
