@@ -1,0 +1,9 @@
+torch
+torchvision
+transformers
+pandas
+pillow
+tqdm
+scikit-learn
+matplotlib
+accelerate

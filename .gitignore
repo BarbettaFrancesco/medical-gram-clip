@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+runs/
+checkpoints/
+dummy_dataset/
+external/
+data/
+dataset/
+mimic-cxr/
+images/
+*.pt
+*.pth
+*.ckpt
+*.zip
