@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--hf_token", type=str, required=True, help="HuggingFace token for MIMIC-CXR")
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--loss_type", type=str, choices=["clip", "gram"], required=True)
+    parser.add_argument("--loss_type", choices=["clip", "gram", "gram_clip"], default="clip")
 
     parser.add_argument("--gram_repo_path", type=str, default="external/GRAM")
     parser.add_argument("--projection_dim", type=int, default=512)
