@@ -14,3 +14,6 @@ images/
 *.pth
 *.ckpt
 *.zip
+dataset/
+.env
+.env

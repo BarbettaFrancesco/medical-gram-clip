@@ -39,9 +39,11 @@ class GramLossAdapter(nn.Module):
 
         repo = Path(gram_repo_path).resolve()
         if not repo.exists():
-            raise FileNotFoundError(
-                f"GRAM repo not found at {repo}. Run: git clone https://github.com/ispamm/GRAM {repo}"
-            )
+            print(f"GRAM repo not found at {repo}. Cloning from GitHub...")
+            import subprocess
+            repo.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "clone", "https://github.com/ispamm/GRAM", str(repo)], check=True)
+            print("Successfully cloned GRAM repo.")
 
         sys.path.insert(0, str(repo))
 

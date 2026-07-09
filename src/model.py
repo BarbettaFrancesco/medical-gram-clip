@@ -12,7 +12,7 @@ class MedicalMultimodal(nn.Module):
     def __init__(
         self,
         vision_model_name: str = "google/vit-base-patch16-224",
-        text_model_name: str = "emilyalsentzer/Bio_ClinicalBERT",
+        text_model_name: str = "NeuML/pubmedbert-base-embeddings",
         projection_dim: int = 512,
     ) -> None:
         super().__init__()

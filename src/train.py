@@ -10,7 +10,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from dataset import MedicalCollator, MimicCXRDataset
+from dataset import MedicalCollator, MIMICCXRDataset
 from eval import retrieval_metrics
 from losses import LossRouter
 from model import MedicalMultimodal
@@ -19,25 +19,24 @@ from model import MedicalMultimodal
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--csv_path", type=str, required=True)
-    parser.add_argument("--image_root", type=str, required=True)
+    parser.add_argument("--hf_token", type=str, required=True, help="HuggingFace token for MIMIC-CXR")
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--loss_type", type=str, choices=["clip", "gram"], required=True)
 
     parser.add_argument("--gram_repo_path", type=str, default="external/GRAM")
     parser.add_argument("--projection_dim", type=int, default=512)
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--grad_accum_steps", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--batch_size", type=int, default=8)  # Manteniamo 8 per sicurezza con 12GB VRAM
+    parser.add_argument("--grad_accum_steps", type=int, default=8)  # Aumentato a 8 (Effective Batch Size = 64)
+    parser.add_argument("--epochs", type=int, default=10)  # Aumentato a 10 epoche
+    parser.add_argument("--lr", type=float, default=1e-5)  # Abbassato il learning rate
     parser.add_argument("--weight_decay", type=float, default=1e-2)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--val_ratio", type=float, default=0.1)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--no_save_checkpoint", action="store_true")
-    parser.add_argument("--vision_layers_unfrozen", type=int, default=1)
-    parser.add_argument("--text_layers_unfrozen", type=int, default=2)
+    parser.add_argument("--vision_layers_unfrozen", type=int, default=3)  # Sbloccati 3 layer
+    parser.add_argument("--text_layers_unfrozen", type=int, default=4)  # Sbloccati 4 layer
 
     return parser.parse_args()
 
@@ -116,17 +115,12 @@ def main() -> None:
     print("[INFO] Starting Medical GRAM-CLIP training", flush=True)
     print(f"[INFO] Loss type: {args.loss_type}", flush=True)
     print(f"[INFO] Device: {device}", flush=True)
-    print(f"[INFO] CSV path: {args.csv_path}", flush=True)
-    print(f"[INFO] Image root: {args.image_root}", flush=True)
+    print(f"[INFO] HF Token provided: {'*' * 10}")
     print(f"[INFO] Output dir: {args.output_dir}", flush=True)
     print("=" * 80, flush=True)
 
     print("[INFO] Loading dataset...", flush=True)
-    dataset = MimicCXRDataset(
-        csv_path=args.csv_path,
-        image_root=args.image_root,
-        max_samples=args.max_samples,
-    )
+    dataset = MIMICCXRDataset(hf_token=args.hf_token, split="train")
 
     if len(dataset) < 2:
         raise ValueError("Dataset must contain at least 2 samples.")
