@@ -8,6 +8,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from gram_utils import volume_computation
+
 
 class ClipInfoNCELoss(nn.Module):
     """
@@ -57,7 +59,6 @@ class GramLossAdapter(nn.Module):
 
     def __init__(
         self,
-        gram_repo_path: str = "external/GRAM",
         contrastive_temp: float = 0.07,
         label_smoothing: float = 0.1,
     ) -> None:
@@ -65,29 +66,7 @@ class GramLossAdapter(nn.Module):
 
         self.contrastive_temp = contrastive_temp
         self.label_smoothing = label_smoothing
-
-        repo = Path(gram_repo_path).resolve()
-
-        if not repo.exists():
-            raise FileNotFoundError(
-                f"GRAM repository not found at:\n"
-                f"{repo}\n\n"
-                f"Run this command from the project root:\n"
-                f"git clone https://github.com/ispamm/GRAM {gram_repo_path}"
-            )
-
-        sys.path.insert(0, str(repo))
-
-        try:
-            from utils.volume import volume_computation
-            self.volume_computation: Callable = volume_computation
-        except ImportError as exc:
-            raise ImportError(
-                f"Could not import volume_computation from the official GRAM repo.\n"
-                f"Expected file:\n"
-                f"{repo}/utils/volume.py\n\n"
-                f"Original error: {exc}"
-            )
+        self.volume_computation: Callable = volume_computation
 
     def forward(
         self,
@@ -119,38 +98,15 @@ class GramLossAdapter(nn.Module):
 
         return 0.5 * (loss_i2t + loss_t2i)
 
-
-class GramClipHybridLoss(nn.Module):
+class MedClipLoss(nn.Module):
     """
-    Hybrid loss: CLIP InfoNCE + GRAM loss.
-
-    alpha controls the balance:
-
-        alpha = 1.0  -> only CLIP
-        alpha = 0.0  -> only GRAM
-        alpha = 0.5  -> half CLIP, half GRAM
-
-    This is useful because pure GRAM can be unstable in a two-modality
-    image-text setting.
+    MedCLIP loss variant that computes semantic similarity from the text 
+    embeddings themselves to form soft targets, preventing false negatives.
     """
 
-    def __init__(
-        self,
-        gram_repo_path: str = "external/GRAM",
-        contrastive_temp: float = 0.07,
-        alpha: float = 0.5,
-    ) -> None:
+    def __init__(self, target_temp: float = 0.1) -> None:
         super().__init__()
-
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError("alpha must be between 0.0 and 1.0.")
-
-        self.alpha = alpha
-        self.clip_loss = ClipInfoNCELoss()
-        self.gram_loss = GramLossAdapter(
-            gram_repo_path=gram_repo_path,
-            contrastive_temp=contrastive_temp,
-        )
+        self.target_temp = target_temp
 
     def forward(
         self,
@@ -158,18 +114,60 @@ class GramClipHybridLoss(nn.Module):
         text_embeds: torch.Tensor,
         logit_scale: torch.Tensor,
     ) -> torch.Tensor:
-        loss_clip = self.clip_loss(
-            image_embeds=image_embeds,
-            text_embeds=text_embeds,
-            logit_scale=logit_scale,
-        )
+        image_embeds = F.normalize(image_embeds, dim=-1)
+        text_embeds = F.normalize(text_embeds, dim=-1)
 
-        loss_gram = self.gram_loss(
-            image_embeds=image_embeds,
-            text_embeds=text_embeds,
-        )
+        logits_per_image = logit_scale * image_embeds @ text_embeds.T
+        logits_per_text = logits_per_image.T
 
-        return self.alpha * loss_clip + (1.0 - self.alpha) * loss_gram
+        # Soft targets based on text similarity
+        sim_text = text_embeds @ text_embeds.T
+        targets = F.softmax(sim_text / self.target_temp, dim=-1)
+
+        loss_i2t = F.cross_entropy(logits_per_image, targets)
+        loss_t2i = F.cross_entropy(logits_per_text, targets)
+
+        return 0.5 * (loss_i2t + loss_t2i)
+
+
+class GramMedLoss(nn.Module):
+    """
+    GramMed loss: Combines GRAM volume computation with MedCLIP's logic
+    of using soft targets derived from text semantic similarities.
+    """
+
+    def __init__(
+        self,
+        contrastive_temp: float = 0.07,
+        target_temp: float = 0.1,
+    ) -> None:
+        super().__init__()
+
+        self.contrastive_temp = contrastive_temp
+        self.target_temp = target_temp
+        self.volume_computation: Callable = volume_computation
+
+    def forward(
+        self,
+        image_embeds: torch.Tensor,
+        text_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        image_embeds = F.normalize(image_embeds, dim=-1)
+        text_embeds = F.normalize(text_embeds, dim=-1)
+
+        volume = self.volume_computation(image_embeds, text_embeds)
+        volume = volume / self.contrastive_temp
+
+        volume_t = volume.T
+
+        # Soft targets from text embeddings similarity
+        sim_text = text_embeds @ text_embeds.T
+        targets = F.softmax(sim_text / self.target_temp, dim=-1)
+
+        loss_i2t = F.cross_entropy(-volume, targets)
+        loss_t2i = F.cross_entropy(-volume_t, targets)
+
+        return 0.5 * (loss_i2t + loss_t2i)
 
 
 class LossRouter(nn.Module):
@@ -179,43 +177,45 @@ class LossRouter(nn.Module):
     Available loss types:
     - clip
     - gram
-    - gram_clip
+    - medclip
+    - gram_med
     """
 
     def __init__(
         self,
         loss_type: str,
-        gram_repo_path: str = "external/GRAM",
         contrastive_temp: float = 0.07,
-        hybrid_alpha: float = 0.5,
+        target_temp: float = 0.1,
     ) -> None:
         super().__init__()
 
-        if loss_type not in {"clip", "gram", "gram_clip"}:
+        if loss_type not in {"clip", "gram", "medclip", "gram_med"}:
             raise ValueError(
-                "loss_type must be one of: 'clip', 'gram', or 'gram_clip'."
+                "loss_type must be one of: 'clip', 'gram', 'medclip', or 'gram_med'."
             )
 
         self.loss_type = loss_type
 
         self.clip_loss: Optional[ClipInfoNCELoss] = None
         self.gram_loss: Optional[GramLossAdapter] = None
-        self.hybrid_loss: Optional[GramClipHybridLoss] = None
+        self.medclip_loss: Optional[MedClipLoss] = None
+        self.gram_med_loss: Optional[GramMedLoss] = None
 
         if loss_type == "clip":
             self.clip_loss = ClipInfoNCELoss()
 
         elif loss_type == "gram":
             self.gram_loss = GramLossAdapter(
-                gram_repo_path=gram_repo_path,
                 contrastive_temp=contrastive_temp,
             )
 
-        elif loss_type == "gram_clip":
-            self.hybrid_loss = GramClipHybridLoss(
-                gram_repo_path=gram_repo_path,
+        elif loss_type == "medclip":
+            self.medclip_loss = MedClipLoss(target_temp=target_temp)
+
+        elif loss_type == "gram_med":
+            self.gram_med_loss = GramMedLoss(
                 contrastive_temp=contrastive_temp,
-                alpha=hybrid_alpha,
+                target_temp=target_temp,
             )
 
     def forward(
@@ -239,12 +239,19 @@ class LossRouter(nn.Module):
                 text_embeds=text_embeds,
             )
 
-        if self.loss_type == "gram_clip":
-            assert self.hybrid_loss is not None
-            return self.hybrid_loss(
+        if self.loss_type == "medclip":
+            assert self.medclip_loss is not None
+            return self.medclip_loss(
                 image_embeds=image_embeds,
                 text_embeds=text_embeds,
                 logit_scale=logit_scale,
+            )
+
+        if self.loss_type == "gram_med":
+            assert self.gram_med_loss is not None
+            return self.gram_med_loss(
+                image_embeds=image_embeds,
+                text_embeds=text_embeds,
             )
 
         raise RuntimeError(f"Unknown loss_type: {self.loss_type}")

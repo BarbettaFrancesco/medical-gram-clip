@@ -19,26 +19,18 @@ from model import MedicalMultimodal
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--hf_token", type=str, required=True, help="HuggingFace token for MIMIC-CXR")
-    parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--loss_type", choices=["clip", "gram", "gram_clip"], default="clip")
+    default_config = str(Path(__file__).resolve().parent.parent / "train_config.json")
+    parser.add_argument("--config", type=str, default=default_config, help="Path to config file")
 
-    parser.add_argument("--gram_repo_path", type=str, default="external/GRAM")
-    parser.add_argument("--projection_dim", type=int, default=512)
-    parser.add_argument("--batch_size", type=int, default=8)  # Manteniamo 8 per sicurezza con 12GB VRAM
-    parser.add_argument("--grad_accum_steps", type=int, default=8)  # Aumentato a 8 (Effective Batch Size = 64)
-    parser.add_argument("--epochs", type=int, default=10)  # Aumentato a 10 epoche
-    parser.add_argument("--lr", type=float, default=1e-5)  # Abbassato il learning rate
-    parser.add_argument("--weight_decay", type=float, default=1e-2)
-    parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--val_ratio", type=float, default=0.1)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--no_save_checkpoint", action="store_true")
-    parser.add_argument("--vision_layers_unfrozen", type=int, default=3)  # Sbloccati 3 layer
-    parser.add_argument("--text_layers_unfrozen", type=int, default=4)  # Sbloccati 4 layer
+    args = parser.parse_args()
 
-    return parser.parse_args()
+    with open(args.config, "r") as f:
+        config = json.load(f)
+
+    for k, v in config.items():
+        setattr(args, k, v)
+
+    return args
 
 
 def train_one_epoch(
@@ -106,7 +98,7 @@ def train_one_epoch(
 def main() -> None:
     args = parse_args()
 
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) / args.loss_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -116,7 +108,7 @@ def main() -> None:
     print(f"[INFO] Loss type: {args.loss_type}", flush=True)
     print(f"[INFO] Device: {device}", flush=True)
     print(f"[INFO] HF Token provided: {'*' * 10}")
-    print(f"[INFO] Output dir: {args.output_dir}", flush=True)
+    print(f"[INFO] Output dir: {output_dir}", flush=True)
     print("=" * 80, flush=True)
 
     print("[INFO] Loading dataset...", flush=True)
@@ -177,7 +169,7 @@ def main() -> None:
     print("[INFO] Model ready", flush=True)
 
     print(f"[INFO] Initializing loss: {args.loss_type}", flush=True)
-    loss_fn = LossRouter(args.loss_type, gram_repo_path=args.gram_repo_path)
+    loss_fn = LossRouter(args.loss_type)
 
     optimizer = AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -194,6 +186,7 @@ def main() -> None:
     )
 
     history: List[Dict[str, float]] = []
+    best_loss = float("inf")
 
     print("[INFO] Starting training loop...", flush=True)
 
@@ -239,10 +232,14 @@ def main() -> None:
             )
 
         if not args.no_save_checkpoint:
-            checkpoint_path = output_dir / f"model_epoch_{epoch + 1}.pt"
-            print(f"[INFO] Saving checkpoint to {checkpoint_path}", flush=True)
-            torch.save(model.state_dict(), checkpoint_path)
-            print("[INFO] Checkpoint saved", flush=True)
+            if train_loss < best_loss:
+                best_loss = train_loss
+                checkpoint_path = output_dir / f"model_{args.loss_type}.pt"
+                print(f"[INFO] New best loss: {best_loss:.4f}. Saving checkpoint to {checkpoint_path}", flush=True)
+                torch.save(model.state_dict(), checkpoint_path)
+                print("[INFO] Checkpoint saved", flush=True)
+            else:
+                print(f"[INFO] Current loss {train_loss:.4f} did not improve from best loss {best_loss:.4f}. Skipping checkpoint save.", flush=True)
         else:
             print("[INFO] Skipping checkpoint save", flush=True)
 
