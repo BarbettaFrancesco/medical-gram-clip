@@ -88,8 +88,21 @@ class MedicalCollator:
         vision_model_name: str = "google/vit-base-patch16-224",
         text_model_name: str = "NeuML/pubmedbert-base-embeddings",
         max_length: int = 256,
+        vision_model_type: str = "vit",
     ) -> None:
-        self.image_processor = AutoImageProcessor.from_pretrained(vision_model_name)
+        self.vision_model_type = vision_model_type
+
+        if self.vision_model_type == "cnn":
+            import timm
+            from torchvision import transforms
+            model_config = timm.data.resolve_model_data_config(vision_model_name)
+            self.image_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=model_config["mean"], std=model_config["std"]),
+            ])
+        else:
+            self.image_processor = AutoImageProcessor.from_pretrained(vision_model_name, use_fast=True)
+
         self.tokenizer = AutoTokenizer.from_pretrained(text_model_name)
         self.max_length = max_length
 
@@ -97,10 +110,15 @@ class MedicalCollator:
         images = [sample["image"] for sample in batch]
         texts = [sample["text"] for sample in batch]
 
-        image_inputs = self.image_processor(
-            images=images,
-            return_tensors="pt",
-        )
+        if self.vision_model_type == "cnn":
+            image_tensors = [self.image_transform(img) for img in images]
+            pixel_values = torch.stack(image_tensors)
+        else:
+            image_inputs = self.image_processor(
+                images=images,
+                return_tensors="pt",
+            )
+            pixel_values = image_inputs["pixel_values"]
 
         text_inputs = self.tokenizer(
             texts,
@@ -111,7 +129,7 @@ class MedicalCollator:
         )
 
         return {
-            "images": image_inputs["pixel_values"],
+            "images": pixel_values,
             "input_ids": text_inputs["input_ids"],
             "attention_mask": text_inputs["attention_mask"],
         }

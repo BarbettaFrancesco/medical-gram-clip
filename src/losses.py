@@ -46,15 +46,7 @@ class GramLossAdapter(nn.Module):
     """
     Adapter for the official GRAM repository.
 
-    Before using this loss, clone the official GRAM repository:
-
-        git clone https://github.com/ispamm/GRAM external/GRAM
-
-    This adapter imports:
-
-        external/GRAM/utils/volume.py
-
-    and uses the official volume_computation function.
+    This adapter imports the volume_computation function from gram_utils.
     """
 
     def __init__(
@@ -113,15 +105,17 @@ class MedClipLoss(nn.Module):
         image_embeds: torch.Tensor,
         text_embeds: torch.Tensor,
         logit_scale: torch.Tensor,
+        raw_text_embeds: torch.Tensor,
     ) -> torch.Tensor:
         image_embeds = F.normalize(image_embeds, dim=-1)
         text_embeds = F.normalize(text_embeds, dim=-1)
+        raw_text_embeds = F.normalize(raw_text_embeds, dim=-1)
 
         logits_per_image = logit_scale * image_embeds @ text_embeds.T
         logits_per_text = logits_per_image.T
 
-        # Soft targets based on text similarity
-        sim_text = text_embeds @ text_embeds.T
+        # Soft targets based on RAW text similarity (prevents moving target collapse)
+        sim_text = raw_text_embeds @ raw_text_embeds.T
         targets = F.softmax(sim_text / self.target_temp, dim=-1)
 
         loss_i2t = F.cross_entropy(logits_per_image, targets)
@@ -151,17 +145,19 @@ class GramMedLoss(nn.Module):
         self,
         image_embeds: torch.Tensor,
         text_embeds: torch.Tensor,
+        raw_text_embeds: torch.Tensor,
     ) -> torch.Tensor:
         image_embeds = F.normalize(image_embeds, dim=-1)
         text_embeds = F.normalize(text_embeds, dim=-1)
+        raw_text_embeds = F.normalize(raw_text_embeds, dim=-1)
 
         volume = self.volume_computation(image_embeds, text_embeds)
         volume = volume / self.contrastive_temp
 
         volume_t = volume.T
 
-        # Soft targets from text embeddings similarity
-        sim_text = text_embeds @ text_embeds.T
+        # Soft targets from stable RAW text embeddings similarity
+        sim_text = raw_text_embeds @ raw_text_embeds.T
         targets = F.softmax(sim_text / self.target_temp, dim=-1)
 
         loss_i2t = F.cross_entropy(-volume, targets)
@@ -223,6 +219,7 @@ class LossRouter(nn.Module):
         image_embeds: torch.Tensor,
         text_embeds: torch.Tensor,
         logit_scale: torch.Tensor,
+        raw_text_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.loss_type == "clip":
             assert self.clip_loss is not None
@@ -241,17 +238,21 @@ class LossRouter(nn.Module):
 
         if self.loss_type == "medclip":
             assert self.medclip_loss is not None
+            assert raw_text_embeds is not None
             return self.medclip_loss(
                 image_embeds=image_embeds,
                 text_embeds=text_embeds,
                 logit_scale=logit_scale,
+                raw_text_embeds=raw_text_embeds,
             )
 
         if self.loss_type == "gram_med":
             assert self.gram_med_loss is not None
+            assert raw_text_embeds is not None
             return self.gram_med_loss(
                 image_embeds=image_embeds,
                 text_embeds=text_embeds,
+                raw_text_embeds=raw_text_embeds,
             )
 
         raise RuntimeError(f"Unknown loss_type: {self.loss_type}")

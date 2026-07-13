@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import argparse
 import json
+import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List
 
@@ -16,21 +17,8 @@ from losses import LossRouter
 from model import MedicalMultimodal
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-
-    default_config = str(Path(__file__).resolve().parent.parent / "train_config.json")
-    parser.add_argument("--config", type=str, default=default_config, help="Path to config file")
-
-    args = parser.parse_args()
-
-    with open(args.config, "r") as f:
-        config = json.load(f)
-
-    for k, v in config.items():
-        setattr(args, k, v)
-
-    return args
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+from train_config import TrainConfig
 
 
 def train_one_epoch(
@@ -42,6 +30,7 @@ def train_one_epoch(
     device: torch.device,
     grad_accum_steps: int,
     use_bf16: bool,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -51,8 +40,6 @@ def train_one_epoch(
 
     use_cuda = device.type == "cuda"
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    scaler_enabled = use_cuda and not use_bf16
-    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
     progress_bar = tqdm(dataloader, desc="Training")
 
@@ -64,13 +51,14 @@ def train_one_epoch(
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_cuda):
             outputs = model(images, input_ids, attention_mask)
             loss = loss_fn(
-                outputs["image_embeds"],
-                outputs["text_embeds"],
-                outputs["logit_scale"],
+                image_embeds=outputs["image_embeds"],
+                text_embeds=outputs["text_embeds"],
+                logit_scale=outputs["logit_scale"],
+                raw_text_embeds=outputs.get("raw_text_embeds"),
             )
             loss = loss / grad_accum_steps
 
-        if scaler_enabled:
+        if scaler is not None:
             scaler.scale(loss).backward()
         else:
             loss.backward()
@@ -79,7 +67,7 @@ def train_one_epoch(
         is_last_step = (step + 1) == len(dataloader)
 
         if is_accumulation_step or is_last_step:
-            if scaler_enabled:
+            if scaler is not None:
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -96,7 +84,7 @@ def train_one_epoch(
 
 
 def main() -> None:
-    args = parse_args()
+    args = TrainConfig()
 
     output_dir = Path(args.output_dir) / args.loss_type
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +122,10 @@ def main() -> None:
     )
 
     print("[INFO] Loading BioClinicalBERT tokenizer...", flush=True)
-    collator = MedicalCollator()
+    collator = MedicalCollator(
+        vision_model_type=getattr(args, "vision_model_type", "vit"),
+        vision_model_name=getattr(args, "vision_model_name", "google/vit-base-patch16-224"),
+    )
 
     pin_memory = device.type == "cuda"
 
@@ -156,8 +147,12 @@ def main() -> None:
         pin_memory=pin_memory,
     )
 
-    print("[INFO] Loading ViT + BioClinicalBERT model...", flush=True)
-    model = MedicalMultimodal(projection_dim=args.projection_dim)
+    print("[INFO] Loading ViT/CNN + BioClinicalBERT model...", flush=True)
+    model = MedicalMultimodal(
+        projection_dim=args.projection_dim,
+        vision_model_type=getattr(args, "vision_model_type", "vit"),
+        vision_model_name=getattr(args, "vision_model_name", "google/vit-base-patch16-224"),
+    )
 
     print("[INFO] Freezing encoders...", flush=True)
     model.freeze_encoders(
@@ -168,8 +163,12 @@ def main() -> None:
     model.to(device)
     print("[INFO] Model ready", flush=True)
 
-    print(f"[INFO] Initializing loss: {args.loss_type}", flush=True)
-    loss_fn = LossRouter(args.loss_type)
+    print(f"[INFO] Initializing loss: {args.loss_type} (target_temp={getattr(args, 'target_temp', 0.1)}, contrastive_temp={getattr(args, 'contrastive_temp', 0.07)})", flush=True)
+    loss_fn = LossRouter(
+        args.loss_type,
+        contrastive_temp=getattr(args, "contrastive_temp", 0.07),
+        target_temp=getattr(args, "target_temp", 0.1),
+    )
 
     optimizer = AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -188,6 +187,9 @@ def main() -> None:
     history: List[Dict[str, float]] = []
     best_loss = float("inf")
 
+    # Initialize GradScaler once outside the loop (only if using CUDA and not bf16)
+    scaler = torch.amp.GradScaler("cuda") if (device.type == "cuda" and not args.bf16) else None
+
     print("[INFO] Starting training loop...", flush=True)
 
     for epoch in range(args.epochs):
@@ -202,6 +204,7 @@ def main() -> None:
             device=device,
             grad_accum_steps=args.grad_accum_steps,
             use_bf16=args.bf16,
+            scaler=scaler,
         )
 
         print("[INFO] Running retrieval evaluation...", flush=True)
@@ -225,7 +228,7 @@ def main() -> None:
                 {
                     "loss_type": args.loss_type,
                     "history": history,
-                    "args": vars(args),
+                    "args": asdict(args),
                 },
                 f,
                 indent=2,
