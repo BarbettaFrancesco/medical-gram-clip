@@ -14,20 +14,20 @@ def load_history(path: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--clip_metrics", type=str, required=True)
-    parser.add_argument("--gram_metrics", type=str, required=True)
+    parser.add_argument("--baseline_metrics", type=str, required=True)
+    parser.add_argument("--proposed_metrics", type=str, required=True)
     parser.add_argument("--output", type=str, default="comparison.png")
     args = parser.parse_args()
 
-    clip = load_history(args.clip_metrics)
-    gram = load_history(args.gram_metrics)
+    baseline = load_history(args.baseline_metrics)
+    proposed = load_history(args.proposed_metrics)
 
     keys = ["i2t_R@1", "i2t_R@5", "i2t_R@10", "t2i_R@1", "t2i_R@5", "t2i_R@10"]
 
     for key in keys:
         plt.figure()
-        plt.plot([x["epoch"] for x in clip], [x[key] for x in clip], label=f"CLIP {key}")
-        plt.plot([x["epoch"] for x in gram], [x[key] for x in gram], label=f"GRAM {key}")
+        plt.plot([x["epoch"] for x in baseline], [x[key] for x in baseline], label=f"MedCLIP {key}")
+        plt.plot([x["epoch"] for x in proposed], [x[key] for x in proposed], label=f"GRAM-Med {key}")
         plt.xlabel("Epoch")
         plt.ylabel(key)
         plt.legend()

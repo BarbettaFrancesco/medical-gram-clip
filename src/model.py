@@ -15,6 +15,7 @@ class MedicalMultimodal(nn.Module):
         text_model_name: str = "NeuML/pubmedbert-base-embeddings",
         projection_dim: int = 512,
         vision_model_type: str = "vit",
+        gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
 
@@ -30,6 +31,13 @@ class MedicalMultimodal(nn.Module):
 
         self.text_encoder = AutoModel.from_pretrained(text_model_name)
         
+        if gradient_checkpointing:
+            if hasattr(self.vision_encoder, "set_grad_checkpointing"):
+                self.vision_encoder.set_grad_checkpointing(True)
+            elif hasattr(self.vision_encoder, "gradient_checkpointing_enable"):
+                self.vision_encoder.gradient_checkpointing_enable()
+            self.text_encoder.gradient_checkpointing_enable()
+            
         # Instantiate a separate, completely frozen text encoder specifically to 
         # generate stable ground truth semantic targets, preventing target collapse.
         self.target_text_encoder = AutoModel.from_pretrained(text_model_name)
@@ -49,7 +57,10 @@ class MedicalMultimodal(nn.Module):
         for param in self.text_encoder.parameters():
             param.requires_grad = False
 
-        if self.vision_model_type == "vit":
+        if vision_layers_unfrozen == -1:
+            for param in self.vision_encoder.parameters():
+                param.requires_grad = True
+        elif self.vision_model_type == "vit":
             # ViT encoder blocks
             if hasattr(self.vision_encoder, "encoder"):
                 for block in self.vision_encoder.encoder.layer[-vision_layers_unfrozen:]:
@@ -62,8 +73,11 @@ class MedicalMultimodal(nn.Module):
                     for param in child.parameters():
                         param.requires_grad = True
 
+        if text_layers_unfrozen == -1:
+            for param in self.text_encoder.parameters():
+                param.requires_grad = True
         # BERT encoder blocks
-        if hasattr(self.text_encoder, "encoder"):
+        elif hasattr(self.text_encoder, "encoder"):
             for block in self.text_encoder.encoder.layer[-text_layers_unfrozen:]:
                 for param in block.parameters():
                     param.requires_grad = True

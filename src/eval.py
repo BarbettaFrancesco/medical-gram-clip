@@ -26,7 +26,7 @@ def extract_embeddings(
         outputs = model(images, input_ids, attention_mask)
         
         # Extract raw CLS token from the text encoder (before projector)
-        raw_text_outputs = model.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
+        raw_text_outputs = model.target_text_encoder(input_ids=input_ids, attention_mask=attention_mask)
         raw_text_cls = raw_text_outputs.last_hidden_state[:, 0]
 
         image_embeddings.append(outputs["image_embeds"].cpu())

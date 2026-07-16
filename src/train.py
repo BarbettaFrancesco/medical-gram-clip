@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List
 
@@ -15,6 +14,7 @@ from dataset import MedicalCollator, MIMICCXRDataset
 from eval import retrieval_metrics
 from losses import LossRouter
 from model import MedicalMultimodal
+from transformers import get_cosine_schedule_with_warmup
 
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -152,6 +152,7 @@ def main() -> None:
         projection_dim=args.projection_dim,
         vision_model_type=getattr(args, "vision_model_type", "vit"),
         vision_model_name=getattr(args, "vision_model_name", "google/vit-base-patch16-224"),
+        gradient_checkpointing=getattr(args, "gradient_checkpointing", False),
     )
 
     print("[INFO] Freezing encoders...", flush=True)
@@ -178,10 +179,12 @@ def main() -> None:
 
     steps_per_epoch = max(1, (len(train_loader) + args.grad_accum_steps - 1) // args.grad_accum_steps)
     total_steps = max(1, steps_per_epoch * args.epochs)
+    warmup_steps = int(total_steps * 0.1)
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        T_max=total_steps,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
     )
 
     history: List[Dict[str, float]] = []
@@ -228,7 +231,7 @@ def main() -> None:
                 {
                     "loss_type": args.loss_type,
                     "history": history,
-                    "args": asdict(args),
+                    "args": vars(args),
                 },
                 f,
                 indent=2,

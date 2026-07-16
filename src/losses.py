@@ -8,9 +8,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from gram_utils import volume_computation
-
-
 class ClipInfoNCELoss(nn.Module):
     """
     Standard CLIP symmetric InfoNCE loss.
@@ -58,7 +55,15 @@ class GramLossAdapter(nn.Module):
 
         self.contrastive_temp = contrastive_temp
         self.label_smoothing = label_smoothing
-        self.volume_computation: Callable = volume_computation
+        
+        try:
+            import sys
+            sys.path.append("external/GRAM")
+            from gram_utils import volume_computation
+            self.volume_computation: Callable = volume_computation
+        except ImportError:
+            self.volume_computation = lambda i, t: -(i @ t.T)
+            print("[WARNING] gram_utils not found. Using dot-product fallback for GRAM.", flush=True)
 
     def forward(
         self,
@@ -139,7 +144,15 @@ class GramMedLoss(nn.Module):
 
         self.contrastive_temp = contrastive_temp
         self.target_temp = target_temp
-        self.volume_computation: Callable = volume_computation
+        
+        try:
+            import sys
+            sys.path.append("external/GRAM")
+            from gram_utils import volume_computation
+            self.volume_computation: Callable = volume_computation
+        except ImportError:
+            self.volume_computation = lambda i, t: -(i @ t.T)
+            print("[WARNING] gram_utils not found. Using dot-product fallback for GRAM.", flush=True)
 
     def forward(
         self,
