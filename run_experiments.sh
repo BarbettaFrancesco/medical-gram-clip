@@ -23,6 +23,6 @@ python src/train.py --hf_token "$HF_TOKEN" --output_dir "runs/resnet" --loss_typ
 echo "========================================"
 echo "📊 GENERAZIONE DEI GRAFICI"
 echo "========================================"
-python plot_results.py --baseline_metrics runs/resnet/medclip/metrics.json --proposed_metrics runs/resnet/gram_med/metrics.json
+python plot_results.py --baseline_metrics runs/resnet/cnn/medclip/metrics.json --proposed_metrics runs/resnet/cnn/gram_med/metrics.json
 
 echo "✅ TUTTO COMPLETATO! I grafici sono nella cartella PLOT del tuo progetto su Windows."

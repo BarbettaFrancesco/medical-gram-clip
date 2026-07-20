@@ -24,14 +24,10 @@ def extract_embeddings(
         attention_mask = batch["attention_mask"].to(device)
 
         outputs = model(images, input_ids, attention_mask)
-        
-        # Extract raw CLS token from the text encoder (before projector)
-        raw_text_outputs = model.target_text_encoder(input_ids=input_ids, attention_mask=attention_mask)
-        raw_text_cls = raw_text_outputs.last_hidden_state[:, 0]
 
         image_embeddings.append(outputs["image_embeds"].cpu())
         text_embeddings.append(outputs["text_embeds"].cpu())
-        raw_text_embeddings.append(raw_text_cls.cpu())
+        raw_text_embeddings.append(outputs["raw_text_embeds"].cpu())
 
     return (
         torch.cat(image_embeddings, dim=0), 
@@ -88,16 +84,60 @@ def semantic_recall_at_k(
     return metrics
 
 
+def semantic_precision_at_k(
+    similarity: torch.Tensor, 
+    text_similarity: torch.Tensor, 
+    threshold: float = 0.8, 
+    ks: Iterable[int] = (1, 5, 10)
+) -> Dict[str, float]:
+    metrics = {}
+    
+    # A retrieved item `j` for query `i` is correct if text `j` is similar to text `i`
+    positive_targets = text_similarity >= threshold
+
+    for k in ks:
+        actual_k = min(k, similarity.size(1))
+        if actual_k <= 0:
+            metrics[f"SemP@{k}"] = 0.0
+            continue
+            
+        topk_indices = similarity.topk(actual_k, dim=1).indices
+        
+        # Gather the boolean values from positive_targets using the retrieved indices
+        retrieved_is_positive = positive_targets.gather(1, topk_indices)
+        
+        # Precision: number of correct retrieved items divided by K (actual_k)
+        correct = (retrieved_is_positive.float().sum(dim=1) / actual_k).mean().item()
+        metrics[f"SemP@{k}"] = correct
+
+    return metrics
+
+
 @torch.no_grad()
-def retrieval_metrics(model, dataloader, device: torch.device) -> Dict[str, float]:
+def retrieval_metrics(
+    model, 
+    dataloader, 
+    device: torch.device, 
+    loss_type: str = "clip"
+) -> Dict[str, float]:
     image_embeds, text_embeds, raw_text_embeds = extract_embeddings(model, dataloader, device)
 
     image_embeds = F.normalize(image_embeds, dim=-1)
     text_embeds = F.normalize(text_embeds, dim=-1)
     raw_text_embeds = F.normalize(raw_text_embeds, dim=-1)
 
-    # Standard Contrastive Similarities (using projected embeddings)
-    similarity = image_embeds @ text_embeds.T
+    # Calculate similarity metric based on loss_type
+    if loss_type in {"gram", "gram_med"}:
+        try:
+            from gram_utils import volume_computation
+            # Negated volume serves as similarity metric for GRAM models
+            similarity = -volume_computation(image_embeds, text_embeds)
+        except ImportError:
+            print("[WARNING] gram_utils not found in evaluation. Falling back to cosine similarity.", flush=True)
+            similarity = image_embeds @ text_embeds.T
+    else:
+        # Standard Cosine Similarity (using projected embeddings)
+        similarity = image_embeds @ text_embeds.T
     
     # Text-Text Similarities for Semantic Recall (using raw, stable PubMedBERT embeddings)
     text_similarity = raw_text_embeds @ raw_text_embeds.T
@@ -110,6 +150,10 @@ def retrieval_metrics(model, dataloader, device: torch.device) -> Dict[str, floa
     sem_i2t = semantic_recall_at_k(similarity, text_similarity, threshold=0.8)
     sem_t2i = semantic_recall_at_k(similarity.T, text_similarity, threshold=0.8)
 
+    # Calculate semantic precision
+    semp_i2t = semantic_precision_at_k(similarity, text_similarity, threshold=0.8)
+    semp_t2i = semantic_precision_at_k(similarity.T, text_similarity, threshold=0.8)
+
     metrics = {}
     for key, value in i2t.items():
         metrics[f"i2t_{key}"] = value
@@ -119,6 +163,11 @@ def retrieval_metrics(model, dataloader, device: torch.device) -> Dict[str, floa
     for key, value in sem_i2t.items():
         metrics[f"i2t_{key}"] = value
     for key, value in sem_t2i.items():
+        metrics[f"t2i_{key}"] = value
+
+    for key, value in semp_i2t.items():
+        metrics[f"i2t_{key}"] = value
+    for key, value in semp_t2i.items():
         metrics[f"t2i_{key}"] = value
 
     return metrics

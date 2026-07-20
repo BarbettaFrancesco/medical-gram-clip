@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List
 
@@ -14,7 +15,6 @@ from dataset import MedicalCollator, MIMICCXRDataset
 from eval import retrieval_metrics
 from losses import LossRouter
 from model import MedicalMultimodal
-from transformers import get_cosine_schedule_with_warmup
 
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -86,7 +86,8 @@ def train_one_epoch(
 def main() -> None:
     args = TrainConfig()
 
-    output_dir = Path(args.output_dir) / args.loss_type
+    vision_model_type = getattr(args, "vision_model_type", "vit")
+    output_dir = Path(args.output_dir) / vision_model_type / args.loss_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -101,6 +102,10 @@ def main() -> None:
 
     print("[INFO] Loading dataset...", flush=True)
     dataset = MIMICCXRDataset(hf_token=args.hf_token, split="train")
+
+    if getattr(args, "max_samples", None) is not None and len(dataset) > args.max_samples:
+        print(f"[INFO] Limiting dataset to {args.max_samples} samples", flush=True)
+        dataset = torch.utils.data.Subset(dataset, range(args.max_samples))
 
     if len(dataset) < 2:
         raise ValueError("Dataset must contain at least 2 samples.")
@@ -147,12 +152,11 @@ def main() -> None:
         pin_memory=pin_memory,
     )
 
-    print("[INFO] Loading ViT/CNN + BioClinicalBERT model...", flush=True)
+    print("[INFO] Loading ViT/CNN + PubMedBERT model...", flush=True)
     model = MedicalMultimodal(
         projection_dim=args.projection_dim,
         vision_model_type=getattr(args, "vision_model_type", "vit"),
         vision_model_name=getattr(args, "vision_model_name", "google/vit-base-patch16-224"),
-        gradient_checkpointing=getattr(args, "gradient_checkpointing", False),
     )
 
     print("[INFO] Freezing encoders...", flush=True)
@@ -179,12 +183,10 @@ def main() -> None:
 
     steps_per_epoch = max(1, (len(train_loader) + args.grad_accum_steps - 1) // args.grad_accum_steps)
     total_steps = max(1, steps_per_epoch * args.epochs)
-    warmup_steps = int(total_steps * 0.1)
 
-    scheduler = get_cosine_schedule_with_warmup(
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
+        T_max=total_steps,
     )
 
     history: List[Dict[str, float]] = []
@@ -211,7 +213,7 @@ def main() -> None:
         )
 
         print("[INFO] Running retrieval evaluation...", flush=True)
-        metrics = retrieval_metrics(model, val_loader, device)
+        metrics = retrieval_metrics(model, val_loader, device, args.loss_type)
 
         row: Dict[str, float] = {
             "epoch": float(epoch + 1),
@@ -231,7 +233,7 @@ def main() -> None:
                 {
                     "loss_type": args.loss_type,
                     "history": history,
-                    "args": vars(args),
+                    "args": asdict(args),
                 },
                 f,
                 indent=2,

@@ -57,8 +57,6 @@ class GramLossAdapter(nn.Module):
         self.label_smoothing = label_smoothing
         
         try:
-            import sys
-            sys.path.append("external/GRAM")
             from gram_utils import volume_computation
             self.volume_computation: Callable = volume_computation
         except ImportError:
@@ -69,26 +67,27 @@ class GramLossAdapter(nn.Module):
         self,
         image_embeds: torch.Tensor,
         text_embeds: torch.Tensor,
+        logit_scale: torch.Tensor,
     ) -> torch.Tensor:
         image_embeds = F.normalize(image_embeds, dim=-1)
         text_embeds = F.normalize(text_embeds, dim=-1)
 
         volume = self.volume_computation(image_embeds, text_embeds)
-        volume = volume / self.contrastive_temp
+        scaled_neg_volume = -volume * logit_scale
 
-        volume_t = volume.T
+        scaled_neg_volume_t = scaled_neg_volume.T
 
         batch_size = image_embeds.size(0)
         targets = torch.arange(batch_size, device=image_embeds.device)
 
         loss_i2t = F.cross_entropy(
-            -volume,
+            scaled_neg_volume,
             targets,
             label_smoothing=self.label_smoothing,
         )
 
         loss_t2i = F.cross_entropy(
-            -volume_t,
+            scaled_neg_volume_t,
             targets,
             label_smoothing=self.label_smoothing,
         )
@@ -146,8 +145,6 @@ class GramMedLoss(nn.Module):
         self.target_temp = target_temp
         
         try:
-            import sys
-            sys.path.append("external/GRAM")
             from gram_utils import volume_computation
             self.volume_computation: Callable = volume_computation
         except ImportError:
@@ -158,6 +155,7 @@ class GramMedLoss(nn.Module):
         self,
         image_embeds: torch.Tensor,
         text_embeds: torch.Tensor,
+        logit_scale: torch.Tensor,
         raw_text_embeds: torch.Tensor,
     ) -> torch.Tensor:
         image_embeds = F.normalize(image_embeds, dim=-1)
@@ -165,16 +163,16 @@ class GramMedLoss(nn.Module):
         raw_text_embeds = F.normalize(raw_text_embeds, dim=-1)
 
         volume = self.volume_computation(image_embeds, text_embeds)
-        volume = volume / self.contrastive_temp
+        scaled_neg_volume = -volume * logit_scale
 
-        volume_t = volume.T
+        scaled_neg_volume_t = scaled_neg_volume.T
 
         # Soft targets from stable RAW text embeddings similarity
         sim_text = raw_text_embeds @ raw_text_embeds.T
         targets = F.softmax(sim_text / self.target_temp, dim=-1)
 
-        loss_i2t = F.cross_entropy(-volume, targets)
-        loss_t2i = F.cross_entropy(-volume_t, targets)
+        loss_i2t = F.cross_entropy(scaled_neg_volume, targets)
+        loss_t2i = F.cross_entropy(scaled_neg_volume_t, targets)
 
         return 0.5 * (loss_i2t + loss_t2i)
 
@@ -247,6 +245,7 @@ class LossRouter(nn.Module):
             return self.gram_loss(
                 image_embeds=image_embeds,
                 text_embeds=text_embeds,
+                logit_scale=logit_scale,
             )
 
         if self.loss_type == "medclip":
@@ -265,6 +264,7 @@ class LossRouter(nn.Module):
             return self.gram_med_loss(
                 image_embeds=image_embeds,
                 text_embeds=text_embeds,
+                logit_scale=logit_scale,
                 raw_text_embeds=raw_text_embeds,
             )
 
