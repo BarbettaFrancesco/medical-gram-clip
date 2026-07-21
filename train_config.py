@@ -4,13 +4,12 @@ from typing import Optional
 @dataclass
 class TrainConfig:
     # --- Dataset & Environment ---
-    hf_token: str = "YOUR_HF_TOKEN_HERE"  # Hugging Face token for loading datasets
     output_dir: str = "output"            # Directory to save checkpoints and metrics
     num_workers: int = 4                  # Number of dataloader workers
     
     # --- Model Architecture ---
-    vision_model_type: str = "vit"        # "vit" or "cnn"
-    vision_model_name: str = "google/vit-base-patch16-224"   # resnet34, google/vit-base-patch16-224
+    vision_model_type: str = "cnn"        # "vit" or "cnn"
+    vision_model_name: str = "resnet34"   # resnet34, google/vit-base-patch16-224
     projection_dim: int = 512             # Dimension of the joint embedding space
     
     # --- Training Hyperparameters ---

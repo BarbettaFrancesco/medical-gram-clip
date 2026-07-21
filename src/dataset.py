@@ -27,25 +27,15 @@ class MIMICCXRDataset(Dataset):
 
     def __init__(
         self,
-        hf_token: str | None = None,
         split: str = "train",
         dataset_name: str = "MLforHealthcare/mimic-cxr",
     ) -> None:
         super().__init__()
 
-        if hf_token is None:
-            hf_token = os.environ.get("HF_TOKEN")
-
-        if not hf_token:
-            raise ValueError(
-                "Hugging Face token not found. "
-                "Pass --hf_token YOUR_TOKEN or create a .env file with HF_TOKEN=YOUR_TOKEN"
-            )
 
         self.data = load_dataset(
             dataset_name,
             split=split,
-            token=hf_token,
         )
 
     def __len__(self) -> int:

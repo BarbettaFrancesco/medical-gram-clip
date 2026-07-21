@@ -96,12 +96,11 @@ def main() -> None:
     print("[INFO] Starting Medical GRAM-CLIP training", flush=True)
     print(f"[INFO] Loss type: {args.loss_type}", flush=True)
     print(f"[INFO] Device: {device}", flush=True)
-    print(f"[INFO] HF Token provided: {'*' * 10}")
     print(f"[INFO] Output dir: {output_dir}", flush=True)
     print("=" * 80, flush=True)
 
     print("[INFO] Loading dataset...", flush=True)
-    dataset = MIMICCXRDataset(hf_token=args.hf_token, split="train")
+    dataset = MIMICCXRDataset(split="train")
 
     if getattr(args, "max_samples", None) is not None and len(dataset) > args.max_samples:
         print(f"[INFO] Limiting dataset to {args.max_samples} samples", flush=True)
@@ -125,8 +124,7 @@ def main() -> None:
         [train_size, val_size],
         generator=torch.Generator().manual_seed(42),
     )
-
-    print("[INFO] Loading BioClinicalBERT tokenizer...", flush=True)
+    
     collator = MedicalCollator(
         vision_model_type=getattr(args, "vision_model_type", "vit"),
         vision_model_name=getattr(args, "vision_model_name", "google/vit-base-patch16-224"),
@@ -152,23 +150,20 @@ def main() -> None:
         pin_memory=pin_memory,
     )
 
-    print("[INFO] Loading ViT/CNN + PubMedBERT model...", flush=True)
+    
     model = MedicalMultimodal(
         projection_dim=args.projection_dim,
         vision_model_type=getattr(args, "vision_model_type", "vit"),
         vision_model_name=getattr(args, "vision_model_name", "google/vit-base-patch16-224"),
     )
 
-    print("[INFO] Freezing encoders...", flush=True)
     model.freeze_encoders(
         vision_layers_unfrozen=args.vision_layers_unfrozen,
         text_layers_unfrozen=args.text_layers_unfrozen,
     )
 
     model.to(device)
-    print("[INFO] Model ready", flush=True)
 
-    print(f"[INFO] Initializing loss: {args.loss_type} (target_temp={getattr(args, 'target_temp', 0.1)}, contrastive_temp={getattr(args, 'contrastive_temp', 0.07)})", flush=True)
     loss_fn = LossRouter(
         args.loss_type,
         contrastive_temp=getattr(args, "contrastive_temp", 0.07),
